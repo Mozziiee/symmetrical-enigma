@@ -6,9 +6,6 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
-# Single concurrency group for the whole workflow (repo-level):
-# - This ensures only one workflow run executes at a time.
-# - New runs are queued (cancel-in-progress: false) until the running one finishes.
 concurrency:
   group: "via-workflow"
   cancel-in-progress: false
@@ -20,12 +17,9 @@ jobs:
   export-and-run:
     runs-on: ubuntu-22.04
 
-    # Matrix creates exactly MAX_WORKERS parallel workers per workflow run.
     strategy:
       matrix:
-        # exactly 5 workers
         worker: [1, 2, 3, 4, 5]
-      # ensure all 5 run concurrently
       max-parallel: 5
 
     steps:
@@ -34,32 +28,90 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download
+      - name: Generate random names
+        id: names
         shell: bash
         run: |
-          curl -fsSL -o via_1h.zip "${{ secrets.VIA }}"
-          if [ ! -f "via_1h.zip" ]; then
-            echo "Download failed: via_1h.zip not found."
+          set -euo pipefail
+          # create randomized zip name and a script prefix
+          ZIP_NAME="via_$(uuidgen).zip"
+          SCRIPT_PREFIX="via_script_$(uuidgen)"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "SCRIPT_PREFIX=$SCRIPT_PREFIX" >> "$GITHUB_ENV"
+          echo "Generated ZIP_NAME=$ZIP_NAME"
+          echo "Generated SCRIPT_PREFIX=$SCRIPT_PREFIX"
+
+      - name: Download ZIP (randomized name)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.VIA }}" ]; then
+            echo "Secret VIA is empty or missing"
             exit 1
           fi
+          echo "Downloading into $ZIP_NAME"
+          # -f fail on HTTP errors, -L follow redirects, -S show errors
+          curl -fSL -o "$ZIP_NAME" "${{ secrets.VIA }}" || {
+            echo "Download failed for $ZIP_NAME"
+            ls -la
+            exit 1
+          }
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "Download didn't produce file $ZIP_NAME"
+            exit 1
+          fi
+          echo "Download completed: $ZIP_NAME"
 
-      - name: Unzip
+      - name: Unzip and cleanup
         shell: bash
         run: |
-          unzip -q via_1h.zip
-          rm -f via_1h.zip
+          set -euo pipefail
+          echo "Unzipping $ZIP_NAME"
+          unzip -q "$ZIP_NAME" || { echo "unzip failed"; ls -la; exit 1; }
+          rm -f "$ZIP_NAME"
+          echo "Unzip complete and zip removed."
 
-      - name: Make runner executable
+      - name: Find, rename and make script executable
         shell: bash
+        env:
+          SCRIPT_PREFIX: ${{ env.SCRIPT_PREFIX }}
         run: |
-          chmod +x ./via.sh
+          set -euo pipefail
+          # Try to find via.sh anywhere under workspace
+          script_path="$(find . -type f -name 'via.sh' -print -quit || true)"
+          if [ -z "$script_path" ]; then
+            # If not found, fall back to the first executable file named via* (best-effort)
+            script_path="$(find . -type f -iname 'via*' -perm /111 -print -quit || true)"
+          fi
+          if [ -z "$script_path" ]; then
+            echo "Could not find a script named via.sh or an executable via* file in the workspace."
+            echo "Listing tree for debugging:"
+            find . -maxdepth 4 -type f -print
+            exit 1
+          fi
+          echo "Found script at: $script_path"
+          # Build randomized script name
+          new_name="${SCRIPT_PREFIX}_$(date +%s)_$RANDOM.sh"
+          mv -v "$script_path" "$new_name"
+          chmod +x "$new_name"
+          # export chosen script name for later steps
+          echo "EXEC_SCRIPT=$new_name" >> "$GITHUB_ENV"
+          echo "Script renamed to: $new_name"
 
       - name: Run worker
         shell: bash
         env:
           WORKER_ID: ${{ matrix.worker }}
           MAX_WORKERS: ${{ env.MAX_WORKERS }}
+          EXEC_SCRIPT: ${{ env.EXEC_SCRIPT }}
         run: |
+          set -euo pipefail
           echo "Starting worker $WORKER_ID of $MAX_WORKERS"
-          # Pass the worker id to your script so each worker can behave differently if needed
-          ./via.sh "$WORKER_ID"
+          if [ -z "${EXEC_SCRIPT:-}" ]; then
+            echo "EXEC_SCRIPT is not set; aborting"
+            exit 1
+          fi
+          # Run the renamed script and pass worker id
+          echo "Executing ./$EXEC_SCRIPT $WORKER_ID"
+          ./ "$EXEC_SCRIPT" 2>/dev/null || true   # defensive no-op in case of accidental spacing
+          ./"$EXEC_SCRIPT" "$WORKER_ID"
