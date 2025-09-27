@@ -2,7 +2,6 @@ name: via
 
 on:
   schedule:
-    # Run every hour (at minute 0)
     - cron: "0 * * * *"
   workflow_dispatch:
 
@@ -11,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  MAX_WORKERS: "5"  # maximum number of concurrent workers per workflow run
+  MAX_WORKERS: "5"
 
 jobs:
   export-and-run:
@@ -33,7 +32,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # create randomized zip name and a script prefix
           ZIP_NAME="via_$(uuidgen).zip"
           SCRIPT_PREFIX="via_script_$(uuidgen)"
           echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
@@ -45,31 +43,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${{ secrets.VIA }}" ]; then
-            echo "Secret VIA is empty or missing"
-            exit 1
-          fi
-          echo "Downloading into $ZIP_NAME"
-          # -f fail on HTTP errors, -L follow redirects, -S show errors
-          curl -fSL -o "$ZIP_NAME" "${{ secrets.VIA }}" || {
-            echo "Download failed for $ZIP_NAME"
-            ls -la
-            exit 1
-          }
+          curl -fSL -o "$ZIP_NAME" "${{ secrets.VIA }}"
           if [ ! -f "$ZIP_NAME" ]; then
-            echo "Download didn't produce file $ZIP_NAME"
+            echo "Download failed: $ZIP_NAME not found"
             exit 1
           fi
-          echo "Download completed: $ZIP_NAME"
+          echo "Downloaded $ZIP_NAME"
 
       - name: Unzip and cleanup
         shell: bash
         run: |
           set -euo pipefail
-          echo "Unzipping $ZIP_NAME"
-          unzip -q "$ZIP_NAME" || { echo "unzip failed"; ls -la; exit 1; }
+          unzip -q "$ZIP_NAME"
           rm -f "$ZIP_NAME"
-          echo "Unzip complete and zip removed."
+          echo "Unzipped and removed $ZIP_NAME"
 
       - name: Find, rename and make script executable
         shell: bash
@@ -77,41 +64,36 @@ jobs:
           SCRIPT_PREFIX: ${{ env.SCRIPT_PREFIX }}
         run: |
           set -euo pipefail
-          # Try to find via.sh anywhere under workspace
           script_path="$(find . -type f -name 'via.sh' -print -quit || true)"
           if [ -z "$script_path" ]; then
-            # If not found, fall back to the first executable file named via* (best-effort)
             script_path="$(find . -type f -iname 'via*' -perm /111 -print -quit || true)"
           fi
           if [ -z "$script_path" ]; then
-            echo "Could not find a script named via.sh or an executable via* file in the workspace."
-            echo "Listing tree for debugging:"
+            echo "Could not find via.sh or executable via* file."
             find . -maxdepth 4 -type f -print
             exit 1
           fi
-          echo "Found script at: $script_path"
-          # Build randomized script name
+          echo "Found script: $script_path"
           new_name="${SCRIPT_PREFIX}_$(date +%s)_$RANDOM.sh"
           mv -v "$script_path" "$new_name"
           chmod +x "$new_name"
-          # export chosen script name for later steps
           echo "EXEC_SCRIPT=$new_name" >> "$GITHUB_ENV"
-          echo "Script renamed to: $new_name"
+          echo "Renamed script to $new_name"
 
-      - name: Run worker
+      - name: Run worker (with debug)
         shell: bash
         env:
           WORKER_ID: ${{ matrix.worker }}
           MAX_WORKERS: ${{ env.MAX_WORKERS }}
           EXEC_SCRIPT: ${{ env.EXEC_SCRIPT }}
         run: |
+          # NOTE: we run the script *once* via bash to avoid accidental double-invocation.
           set -euo pipefail
           echo "Starting worker $WORKER_ID of $MAX_WORKERS"
           if [ -z "${EXEC_SCRIPT:-}" ]; then
-            echo "EXEC_SCRIPT is not set; aborting"
+            echo "EXEC_SCRIPT not set"
             exit 1
           fi
-          # Run the renamed script and pass worker id
-          echo "Executing ./$EXEC_SCRIPT $WORKER_ID"
-          ./ "$EXEC_SCRIPT" 2>/dev/null || true   # defensive no-op in case of accidental spacing
-          ./"$EXEC_SCRIPT" "$WORKER_ID"
+          echo "About to execute: bash -x \"$EXEC_SCRIPT\" \"$WORKER_ID\""
+          # Run with bash -x for verbose debugging. Remove -x after debugging.
+          bash -x "$EXEC_SCRIPT" "$WORKER_ID"
