@@ -2,7 +2,7 @@ name: via
 
 on:
   schedule:
-    - cron: "*/18 * * * *" 
+    - cron: "*/30 * * * *" 
   workflow_dispatch:
 
 jobs:
